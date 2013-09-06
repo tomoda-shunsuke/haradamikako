@@ -1,0 +1,133 @@
+Option Explicit
+
+'===================================================================================================
+'	定数定義
+'===================================================================================================
+'内部バージョン
+Private Const MY_VERSION = "0.01"
+' 2013/07/24 Ver 0.01  内部バージョン管理前
+
+
+'設定ファイル
+Private Const FILE_NAME_CONFIG = "mca_construction_letter_conf.txt"
+
+Private Const TOOL_NAME = "thankyou_letter_prepare.xls"
+Private Const SHEET_SETTING = "使い方"
+Private Const METHOD_NAME = "サンキューレター作成"
+
+'===================================================================================================
+'	外部変数定義
+'===================================================================================================
+Dim	gFSO					'FileSystemObject
+Dim	gXL						'Excelオブジェクト
+Dim	gMyDir					'自ディレクトリ・パス名
+Dim gSet_dir_mdb			'サンキューレターMDB・フォルダ名
+Dim gSet_dir_excel_out		'サンキューレター（Excel.ver）出力先・パス名
+Dim gSet_dir_pdf_out  		'サンキューレター（PDF.ver）出力先・パス名
+Dim wb						'Excelワークブック
+
+'===================================================================================================
+'	▼メイン処理開始▼
+'===================================================================================================
+'FileSystemObjectを生成
+Set gFSO = CreateObject("Scripting.FileSystemObject")
+gMyDir = gFSO.GetFile(WScript.ScriptFullName).ParentFolder
+
+'Excelオブジェクトを生成
+Set gXL = CreateObject("Excel.Application")
+
+If fnc_Setting = False Then
+	WScript.Quit
+End If
+
+'サンキューレター作成ツール起動
+Set wb = gXL.Workbooks.Open(gMyDir & "\" & TOOL_NAME)
+With wb.Worksheets(SHEET_SETTING)
+	.Range("データフォルダ").Value = gSet_dir_mdb
+	.Range("Excel出力先").Value = gSet_dir_excel_out
+	.Range("PDF出力先").Value = gSet_dir_pdf_out
+	wb.Save
+	gXL.Run wb.Name & "!" & METHOD_NAME
+	wb.Close False
+End With
+Set wb = Nothing
+
+gXL.Quit
+Set gXL = Nothing
+Set gFSO = Nothing
+'===================================================================================================
+'	▲メイン処理終了▲
+'===================================================================================================
+
+'環境確認
+Private Function fnc_Setting()
+	Const ITEM_MDB_FRONT  = "MDB_FRONT"
+
+	Const ITEM_DIR_EXCEL_OUT = "DIR_EXCEL_OUT"
+	Const ITEM_DIR_PDF_OUT = "DIR_PDF_OUT"
+	
+	fnc_Setting = False
+	
+	'設定ファイルの確認。
+	If gFSO.FileExists(gMyDir & "\" & FILE_NAME_CONFIG) Then
+		'設定ファイル読み出し
+		Dim f
+		Dim sLine
+		Dim ss
+		
+		Set f = gFSO.OpenTextFile(gMyDir & "\" & FILE_NAME_CONFIG, 1, False)
+		Do While f.AtEndOfStream <> True
+			sLine = f.ReadLine
+			If sLine <> "" And Left(sLine, 1) <> "'" Then
+				If InStr(sLine, "=") > 1 Then
+					ss = Split(sLine, "=")
+					If Trim(ss(0)) = ITEM_MDB_FRONT Then
+						gSet_path_mdb_front = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_DIR_EXCEL_OUT Then
+						gSet_path_mdb_stock = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_DIR_PDF_OUT Then
+						gSet_path_mdb_master = fnc_properPath(ss(1))
+					End If
+				End If
+			End If
+		Loop
+		f.Close
+		Set f = Nothing
+	Else
+		dispMsg gMyDir & "\" & FILE_NAME_CONFIG & " が見つかりません。"
+		Exit Function
+	End If
+	'MDBの確認。
+	If Not gFSO.FileExists(gSet_dir_mdb) Then
+		dispMsg gSet_dir_mdb & " が見つかりません。"
+		Exit Function
+	End If
+	'EXCEL出力先・フォルダの確認
+	If Not gFSO.FolderExists(gSet_dir_excel_out) Then
+		dispMsg gSet_dir_excel_out & " が見つかりません。"
+		Exit Function
+	End If
+	'PDF出力先・フォルダの確認
+	If (gSet_dir_pdf_out <> "") AND (Not gFSO.FolderExists(gSet_dir_pdf_out)) Then
+		dispMsg gSet_dir_blacklist & " が見つかりません。"
+		Exit Function
+	End If
+	fnc_Setting = True
+End Function
+
+'パス情報の適正化
+Private Function fnc_properPath(sPath)
+	sPath = Trim(sPath)
+	If Left(sPath, 2) = "\\" Or Mid(sPath, 2, 1) = ":" Then
+		'絶対パス
+		fnc_properPath = sPath
+	Else
+		'相対パス
+		fnc_properPath = gMyDir & "\" & sPath
+	End If
+End Function
+
+Private Sub dispMsg(sMsg)
+	MsgBox sMsg, vbOKOnly, "[MCA]サンキューレター作成ツール Ver " & MY_VERSION
+End Sub
+

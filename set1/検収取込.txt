@@ -1,0 +1,440 @@
+Option Explicit
+
+'===================================================================================================
+'	定数定義
+'===================================================================================================
+'内部バージョン
+Private Const MY_VERSION = "1.12"
+' 2013/02/08 Ver 0.01  内部バージョン管理前
+' 2013/03/24 Ver 0.02  環境設定ファイル導入
+' 2013/04/09 Ver 0.03  ブラックリスト対応追加
+' 2013/04/19 Ver 0.04  ブラックリスト精査OK対応追加
+' 2013/04/24 Ver 0.05  ActiveWorkbook指定を回避。
+' 2013/05/27 Ver 1.00  ブラックリスト履歴管理機能追加。
+' 2013/05/28 Ver 1.01  工事完了報告書ソート処理追加
+' 2013/05/31 Ver 1.01a ソートツールのシート名、メソッド名修正。
+' 2013/06/06 Ver 1.11  ブラックリスト履歴過去データ削除機能追加。ブラックリストNGフォルダを設定ファイルから取得に変更。
+' 2013/06/11 Ver 1.12  ブラックリストNGフォルダ内のデータ退避処理追加（同フォルダが自由に設定可能になったため）。
+
+'設定ファイル
+Private Const FILE_NAME_CONFIG = "mca_construction_import_conf.txt"
+
+Private Const TOOL_NAME_SORT = "FM管理番号ソートツール.xls"
+Private Const SHEET_SETTING_SORT = "コピー編集"
+Private Const METHOD_NAME_SORT = "ファイルソート"
+
+Private Const TOOL_NAME_BL = "ブラックリスト対象チェックツール.xls"
+Private Const SHEET_SETTING_BL = "ブラックリスト使い方"
+Private Const METHOD_NAME_BL = "ブラックリストチェック"
+'Private Const SUBDIR_BLACKLIST_NG = "ブラックリスト対象"	'何故これだけ場所が固定なのか？
+
+Private Const MDB_BLACKLIST_HISTORY = "ブラックリスト履歴.mdb"
+Private Const TEMPLATE_BLACKLIST_HISTORY = "ブラックリスト対象_template.xls"
+Private Const TEMPLATE_SHEET_NAME = "ブラックリスト監視履歴"
+Private Const FILENAME_BLACKLIST_HISTORY = "ブラックリスト対象一覧"
+Private Const MDB_BL_HIST_TBL_NG = "ブラックリスト検出ファイル"
+Private Const MDB_BL_HIST_TBL_OK = "ブラックリスト精査済みファイル"
+Private Const MDB_BL_HIST_Q_LSIT = "Q1001_ブラックリスト対象履歴"
+Private Const adExecuteNoRecords = &h80
+
+Private Const FOLDER_NAME_BACKUP_NG = "退避"
+
+Private Const TOOL_NAME = "検収完了通知書取込ツール.xls"
+Private Const SHEET_SETTING = "使い方"
+Private Const METHOD_NAME = "検収完了通知書取込"
+
+'===================================================================================================
+'	外部変数定義
+'===================================================================================================
+Private	gFSO					'FileSystemObject
+Private	gXL						'Excelオブジェクト
+Private	gMyDir					'自ディレクトリ・パス名
+Private gSet_dir_data			'取込データ・フォルダ名
+Private gSet_path_mdb_front		'I/F用MDBパス名
+Private gSet_path_mdb_stock		'蓄積用MDBパス名
+Private gSet_path_mdb_master	'マスタ用MDBパス名
+Private gSet_dir_blacklist		'ブラックリスト・パス名
+Private gSet_dir_blacklist_ok	'ブラックリスト・精査済みパス名
+Private gSet_dir_blacklist_ng	'ブラックリストNG出力パス名
+Private gSet_path_mdb_hist		'ブラックリスト履歴MDBパス名
+Private gSet_dir_blacklist_hist	'ブラックリスト履歴出力フォルダ・パス名
+Private gSet_path_temp_hist		'ブラックリスト履歴出力テンプレート・パス名
+Private gBLHistFlg				'ブラックリスト履歴処理実施フラグ
+
+'===================================================================================================
+'	▼メイン処理開始▼
+'===================================================================================================
+Dim wb			'Excelワークブック
+Dim conHist		'ブラックリスト履歴DB接続
+
+'FileSystemObjectを生成
+Set gFSO = CreateObject("Scripting.FileSystemObject")
+gMyDir = gFSO.GetFile(WScript.ScriptFullName).ParentFolder
+
+'Excelオブジェクトを生成
+Set gXL = CreateObject("Excel.Application")
+
+If fnc_Setting = False Then
+	WScript.Quit
+End If
+
+'FM管理番号ソートツール起動
+Set wb = gXL.Workbooks.Open(gMyDir & "\" & TOOL_NAME_SORT)
+With wb.Worksheets(SHEET_SETTING_SORT)
+	.Range("データフォルダ").Value = gSet_dir_data
+	wb.Save
+	gXL.Run wb.Name & "!" & METHOD_NAME_SORT
+	wb.Close False
+End With
+Set wb = Nothing
+
+'ブラックリスト履歴DBオープン
+If gBLHistFlg = True Then
+	Set conHist = CreateObject("ADODB.Connection")
+	conHist.Open "Driver={Microsoft Access Driver (*.mdb)}; DBQ=" & gSet_path_mdb_hist & ";"
+End If
+
+'ブラックリスト・チェック処理
+If gSet_dir_blacklist <> "" Then
+	'前回ブラックリスト対象ファイルを退避
+	Call fnc_backupBlackListNG(gSet_dir_blacklist_ng)
+	
+	Set wb = gXL.Workbooks.Open(gMyDir & "\" & TOOL_NAME_BL)
+	With wb.Worksheets(SHEET_SETTING_BL)
+		.Range("データフォルダ").Value = gSet_dir_data
+		.Range("ブラックリストフォルダ").Value = gSet_dir_blacklist
+		.Range("ブラックリストNG出力").Value = gSet_dir_blacklist_ng
+		wb.Save
+		gXL.Run wb.Name & "!" & METHOD_NAME_BL
+		wb.Close False
+	End With
+	Set wb = Nothing
+	
+	'チェック結果をブラックリスト履歴登録
+	fnc_registBlackListHistoryNG conHist, gSet_dir_blacklist_ng
+End If
+
+
+
+
+'ブラックリスト精査済みデータを取込データフォルダに移動
+If gSet_dir_blacklist_ok <> "" Then
+	'精査済みデータをブラックリスト履歴登録
+	fnc_registBlackListHistoryOK conHist, gSet_dir_blacklist_ok
+	
+	'精査済みデータを移動
+	On Error Resume Next
+	gFSO.MoveFile gSet_dir_blacklist_ok & "\*.xls", gSet_dir_data & "\"
+	On Error GoTo 0
+End If
+
+'ブラックリスト履歴最終処理
+If gBLHistFlg = True Then
+	'ブラックリスト履歴データ出力
+	fnc_outputBlackListHistory conHist
+	
+	'ブラックリスト履歴DBクローズ
+	conHist.Close
+	Set conHist = Nothing
+End If
+
+
+
+
+'取込ツール起動
+Set wb = gXL.Workbooks.Open(gMyDir & "\" & TOOL_NAME)
+With wb.Worksheets(SHEET_SETTING)
+	.Range("データフォルダ").Value = gSet_dir_data
+	.Range("検収入力MDB").Value = gSet_path_mdb_front
+	.Range("検収蓄積MDB").Value = gSet_path_mdb_stock
+	.Range("検収マスタMDB").Value = gSet_path_mdb_master
+	wb.Save
+	gXL.Run wb.Name & "!" & METHOD_NAME
+	wb.Close False
+End With
+Set wb = Nothing
+
+gXL.Quit
+Set gXL = Nothing
+Set gFSO = Nothing
+'===================================================================================================
+'	▲メイン処理終了▲
+'===================================================================================================
+
+'環境確認
+Private Function fnc_Setting()
+	Const ITEM_DIR_DATA   = "DIR_DATA"
+	Const ITEM_MDB_FRONT  = "MDB_FRONT"
+	Const ITEM_MDB_STOCK  = "MDB_STOCK"
+	Const ITEM_MDB_MASTER = "MDB_MASTER"
+	Const ITEM_DIR_BLACKLIST = "DIR_BLACKLIST"
+	Const ITEM_DIR_BLACKLIST_OK = "DIR_BLACKLIST_OK"
+	Const ITEM_DIR_BLACKLIST_NG = "DIR_BLACKLIST_NG"
+	Const ITEM_DIR_BLACKLIST_HIST = "DIR_BLACKLIST_HISTORY"
+	
+	fnc_Setting = False
+	
+	'設定ファイルの確認。
+	If gFSO.FileExists(gMyDir & "\" & FILE_NAME_CONFIG) Then
+		'設定ファイル読み出し
+		Dim f
+		Dim sLine
+		Dim ss
+		
+		Set f = gFSO.OpenTextFile(gMyDir & "\" & FILE_NAME_CONFIG, 1, False)
+		Do While f.AtEndOfStream <> True
+			sLine = f.ReadLine
+			If sLine <> "" And Left(sLine, 1) <> "'" Then
+				If InStr(sLine, "=") > 1 Then
+					ss = Split(sLine, "=")
+					If Trim(ss(0)) = ITEM_MDB_FRONT Then
+						gSet_path_mdb_front = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_MDB_STOCK Then
+						gSet_path_mdb_stock = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_MDB_MASTER Then
+						gSet_path_mdb_master = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_DIR_DATA Then
+						gSet_dir_data = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_DIR_BLACKLIST Then
+						gSet_dir_blacklist = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_DIR_BLACKLIST_OK Then
+						gSet_dir_blacklist_ok = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_DIR_BLACKLIST_NG Then
+						gSet_dir_blacklist_ng = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_DIR_BLACKLIST_HIST Then
+						gSet_dir_blacklist_hist = fnc_properPath(ss(1))
+					End If
+				End If
+			End If
+		Loop
+		f.Close
+		Set f = Nothing
+	Else
+		dispMsg gMyDir & "\" & FILE_NAME_CONFIG & " が見つかりません。"
+		Exit Function
+	End If
+	'MDBの確認。
+	If Not gFSO.FileExists(gSet_path_mdb_front) Then
+		dispMsg gSet_path_mdb_front & " が見つかりません。"
+		Exit Function
+	End If
+	'MDBの確認
+	If Not gFSO.FileExists(gSet_path_mdb_stock) Then
+		dispMsg gSet_path_mdb_stock & " が見つかりません。"
+		Exit Function
+	End If
+	'MDBの確認
+	If Not gFSO.FileExists(gSet_path_mdb_master) Then
+		dispMsg gSet_path_mdb_master & " が見つかりません。"
+		Exit Function
+	End If
+	'データ・フォルダの確認
+	If Not gFSO.FolderExists(gSet_dir_data) Then
+		dispMsg gSet_dir_data & " が見つかりません。"
+		Exit Function
+	End If
+	'ブラックリスト・フォルダの確認
+	If (gSet_dir_blacklist <> "") AND (Not gFSO.FolderExists(gSet_dir_blacklist)) Then
+		dispMsg gSet_dir_blacklist & " が見つかりません。"
+		Exit Function
+	End If
+	'ブラックリスト精査済みフォルダの確認
+	If (gSet_dir_blacklist_ok <> "") AND (Not gFSO.FolderExists(gSet_dir_blacklist_ok)) Then
+		dispMsg gSet_dir_blacklist_ok & " が見つかりません。"
+		Exit Function
+	End If
+	'ブラックリスト対象フォルダの確認
+	If (gSet_dir_blacklist_ng <> "") AND (Not gFSO.FolderExists(gSet_dir_blacklist_ng)) Then
+		dispMsg gSet_dir_blacklist_ng & " が見つかりません。"
+		Exit Function
+	End If
+	'ブラックリスト履歴出力フォルダの確認
+	gBLHistFlg = True
+	gSet_path_mdb_hist = fnc_properPath(MDB_BLACKLIST_HISTORY)
+	gSet_path_temp_hist = fnc_properPath(TEMPLATE_BLACKLIST_HISTORY)
+	'gSet_dir_blacklist_ng = fnc_properPath(SUBDIR_BLACKLIST_NG)
+	If (Not gFSO.FileExists(gSet_path_mdb_hist)) Or (Not gFSO.FileExists(gSet_path_temp_hist)) Or (gSet_dir_blacklist_hist = "") Then
+		gBLHistFlg = False
+	End If
+	If (gBLHistFlg = True) AND (Not gFSO.FolderExists(gSet_dir_blacklist_hist)) Then
+		Call gFSO.CreateFolder(gSet_dir_blacklist_hist)
+	End If
+	
+	fnc_Setting = True
+End Function
+
+'パス情報の適正化
+Private Function fnc_properPath(sPath)
+	sPath = Trim(sPath)
+	If Left(sPath, 2) = "\\" Or Mid(sPath, 2, 1) = ":" Then
+		'絶対パス
+		fnc_properPath = sPath
+	Else
+		'相対パス
+		fnc_properPath = gMyDir & "\" & sPath
+	End If
+End Function
+
+Private Sub dispMsg(sMsg)
+	MsgBox sMsg, vbOKOnly, "[MCA]検収取込ツール Ver " & MY_VERSION
+End Sub
+
+'ブラックリスト対象ファイル退避処理
+Private Function fnc_backupBlackListNG(sFolderNG)
+	Dim fol
+	Dim sBackupRootPath
+	Dim sBackupPath
+	Dim sFolderName
+	Dim sDate
+	Dim n
+	
+	fnc_backupBlackListNG = False
+	
+	'前回ブラックリスト対象ファイルの確認
+	Set fol = gFSO.GetFolder(sFolderNG)
+	If fol.Files.Count = 0 Then
+		Exit Function
+	End If
+	Set fol = Nothing
+	
+	'退避フォルダの作成
+	sBackupRootPath = sFolderNG & "\" & FOLDER_NAME_BACKUP_NG
+	If Not gFSO.FolderExists(sBackupRootPath) Then
+		gFSO.CreateFolder sBackupRootPath
+	End If
+	sDate = Replace(CStr(Date), "/", "")
+	For n = 1 To 100
+		'サブフォルダの作成とブラックリスト対象ファイルの移動
+		sFolderName = sDate & "-" & CStr(n)
+		sBackupPath = sBackupRootPath & "\" & sFolderName
+		If Not gFSO.FolderExists(sBackupPath) Then
+			gFSO.CreateFolder sBackupPath
+			gFSO.MoveFile sFolderNG & "\*.*", sBackupPath & "\"
+			Exit For
+		End If
+	Next
+	
+	fnc_backupBlackListNG = True
+End Function
+
+'===================================================================================================
+'	ブラックリスト履歴処理
+'===================================================================================================
+'ブラックリスト検出ファイル登録
+Private Function fnc_registBlackListHistoryNG(con, sFolder)
+	Dim fol
+	Dim f
+	Dim sSQL
+	Dim sNow
+	
+	fnc_registBlackListHistoryNG = False
+	
+	If gBLHistFlg = False Then
+		Exit Function
+	End If
+	If Not gFSO.FolderExists(sFolder) Then
+		Exit Function
+	End If
+	
+	sNow = CStr(Now())
+	Set fol = gFSO.GetFolder(sFolder)
+	For Each f In fol.Files
+		sSQL =        "INSERT INTO " & MDB_BL_HIST_TBL_NG & " (対象ファイル, 検出日) "
+		sSQL = sSQL & "VALUES ('" & f.Name & "','" & sNow & "');"
+		con.Execute sSQL, , adExecuteNoRecords
+	Next
+	
+	Set fol = Nothing
+	
+	fnc_registBlackListHistoryNG = True
+End Function
+
+'ブラックリスト精査済みファイル登録
+Private Function fnc_registBlackListHistoryOK(con, sFolder)
+	Dim fol
+	Dim f
+	Dim sSQL
+	Dim sNow
+	
+	fnc_registBlackListHistoryOK = False
+	
+	If gBLHistFlg = False Then
+		Exit Function
+	End If
+	If Not gFSO.FolderExists(sFolder) Then
+		Exit Function
+	End If
+	
+	sNow = CStr(Now())
+	Set fol = gFSO.GetFolder(sFolder)
+	For Each f In fol.Files
+		sSQL =        "INSERT INTO " & MDB_BL_HIST_TBL_OK & " (対象ファイル, 配置日) "
+		sSQL = sSQL & "VALUES ('" & f.Name & "','" & sNow & "');"
+		con.Execute sSQL, , adExecuteNoRecords
+	Next
+	
+	Set fol = Nothing
+	
+	fnc_registBlackListHistoryOK = True
+End Function
+
+'ブラックリスト履歴出力
+Private Function fnc_outputBlackListHistory(con)
+	Dim sSQL
+	Dim rs
+	Dim wbHist
+	Dim wsHist
+	Dim sOutFilePath
+	Dim sNow
+	
+	fnc_outputBlackListHistory = False
+	
+	If gBLHistFlg = False Then
+		Exit Function
+	End If
+	
+	'一覧データ抽出
+	Set rs = CreateObject("ADODB.Recordset")
+	sSQL =  "SELECT 対象ファイル,検出日,精査後再取込日 FROM Q1001_ブラックリスト対象履歴;"
+	rs.Open sSQL, con
+	
+	'出力ファイル作成（テンプレートをコピー）
+	sNow = CStr(Now())
+	sNow = Replace(sNow, "/", "")
+	sNow = Replace(sNow, ":", "")
+	sNow = Replace(sNow, " ", "_")
+	sOutFilePath = gSet_dir_blacklist_hist & "\" & FILENAME_BLACKLIST_HISTORY & "_" & sNow & ".xls"
+	gFSO.CopyFile gSet_path_temp_hist, sOutFilePath
+	
+	'データ出力
+	Set wbHist = gXL.Workbooks.Open(sOutFilePath)
+	With wbHist.Worksheets(TEMPLATE_SHEET_NAME)
+		.range("A2").CopyFromRecordset rs
+	End With
+	wbHist.Save
+	wbHist.Close
+	Set wbHist = Nothing
+	
+	'過去データ削除
+	sub_sweepBlackListHistory sOutFilePath
+	
+	fnc_outputBlackListHistory = True
+End Function
+
+'ブラックリスト履歴過去データ削除
+Private Sub sub_sweepBlackListHistory(sOutFilePath)
+	Dim f
+	Dim sFileName
+	Dim sNewFileName
+	
+	sNewFileName = gFSO.GetFileName(sOutFilePath)
+	For Each f In gFSO.GetFolder(gSet_dir_blacklist_hist).Files
+		sFileName = f.Name
+		If Left(sFileName, Len(FILENAME_BLACKLIST_HISTORY)) = FILENAME_BLACKLIST_HISTORY Then
+			If sFileName <> sNewFileName Then
+				Call gFSO.DeleteFile(f.Path, False)
+			End If
+		End If
+	Next
+End Sub
+

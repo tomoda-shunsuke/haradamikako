@@ -1,0 +1,407 @@
+Option Explicit
+
+'===================================================================================================
+'	定数定義
+'===================================================================================================
+'内部バージョン
+Private Const MY_VERSION = "0.02"
+' 2013/07/05 Ver 0.01  バージョン管理開始。
+' 2013/08/02 Ver 0.02  削除対象テーブル追加
+
+'設定ファイル
+Private Const FILE_NAME_CONFIG = "monthly_return_conf.txt"
+
+Private Const adExecuteNoRecords = &h80
+
+'===================================================================================================
+'	外部変数定義
+'===================================================================================================
+'環境情報
+Private gSet_path_mdb_stock		'蓄積用MDBファイル・パス
+Private gSet_path_mdb_master	'マスタMDBファイル・パス
+Private gSet_path_agent_id		'代理店ID
+Private gSet_path_accept_month	'検収月度
+Private gFSO			'FileSystemObject
+Private gMyDir			'自ディレクトリ・パス名
+Private gConStock		'ADOオブジェクト（データ mdb）
+
+'本社一括対象の場合、本社代理店ID、本社代理店名、支社代理店IDを取得
+Private gAgIDMains				'本社代理店ID
+Private gAgIDMainsName			'本社代理店名
+Private gAgIDs()				'支社代理店ID配列
+Private gAgIDsName()			'支社代理店名配列
+
+'===================================================================================================
+'	▼メイン処理開始▼
+'===================================================================================================
+'FileSystemObjectを生成。
+Set gFSO = CreateObject("Scripting.FileSystemObject")
+gMyDir = gFSO.GetFile(WScript.ScriptFullName).ParentFolder
+
+Redim gAgIDs(0)
+
+
+'環境確認：「monthly_return_conf.txt」内容の確認
+If fnc_Setting() = False Then
+	Set gFSO = Nothing
+	WScript.Quit
+End If
+
+'本社一括チェック
+If fnc_checkAgID(gSet_path_agent_id) = False Then
+	dispMsg "本社一括チェック処理を中止します。"
+	Set gFSO = Nothing
+	WScript.Quit
+End If
+
+'処理継続確認
+If fnc_checkWill() = False Then
+	dispMsg "処理を中止します。"
+	Set gFSO = Nothing
+	WScript.Quit
+End If
+
+'ADOオブジェクトを作成
+Set gConStock = CreateObject("ADODB.Connection")
+
+'ADOを使いMDBをオープン：検収蓄積MDB
+gConStock.Open "Driver={Microsoft Access Driver (*.mdb)}; DBQ=" & gSet_path_mdb_stock & ";"
+
+'月次データを差し戻し
+Call fnc_returnMDB(gConStock)
+
+'ADOをクローズ
+gConStock.Close
+
+Set gConStock = Nothing
+Set gFSO = Nothing
+Redim gAgIDs(0)
+
+dispMsg "終了"
+
+'===================================================================================================
+'	▲メイン処理終了▲
+'===================================================================================================
+
+'環境確認
+Private Function fnc_Setting()
+	Const ITEM_MDB_STOCK = "MDB_STOCK"			'検収蓄積MDB
+	Const ITEM_MDB_MASTER = "MDB_MASTER"		'検収マスタMDB
+	Const ITEM_AGENT_ID = "AGENT_ID"			'代理店ID
+	Const ITEM_ACCEPT_MONTH = "ACCEPT_MONTH"	'検収月度
+	
+	fnc_Setting = False
+	
+	'設定ファイルの確認。
+	If gFSO.FileExists(gMyDir & "\" & FILE_NAME_CONFIG) Then
+		'設定ファイル読み出し「monthly_return_conf.txt」
+		Dim f
+		Dim sLine
+		Dim ss
+		
+		Set f = gFSO.OpenTextFile(gMyDir & "\" & FILE_NAME_CONFIG, 1, False)
+		Do While f.AtEndOfStream <> True
+			sLine = f.ReadLine
+			If sLine <> "" And Left(sLine, 1) <> "'" Then
+				If InStr(sLine, "=") > 1 Then
+					ss = Split(sLine, "=")
+					If Trim(ss(0)) = ITEM_MDB_STOCK Then					'検収蓄積MDB
+						gSet_path_mdb_stock = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_MDB_MASTER Then				'検収マスタMDB
+						gSet_path_mdb_master = fnc_properPath(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_AGENT_ID Then					'代理店ID
+						gSet_path_agent_id = Trim(ss(1))
+					ElseIf Trim(ss(0)) = ITEM_ACCEPT_MONTH Then				'検収月度
+						gSet_path_accept_month = Trim(ss(1))
+					End If
+				End If
+			End If
+		Loop
+		f.Close
+		Set f = Nothing
+	Else
+		dispMsg gMyDir & "\" & FILE_NAME_CONFIG & " が見つかりません。"
+		Exit Function
+	End If
+	'検収蓄積MDBの確認
+	If Not gFSO.FileExists(gSet_path_mdb_stock) Then
+		dispMsg gSet_path_mdb_stock & " が見つかりません。"
+		Exit Function
+	End If
+	'検収マスタMDBの確認
+	If Not gFSO.FileExists(gSet_path_mdb_master) Then
+		dispMsg gSet_path_mdb_master & " が見つかりません。"
+		Exit Function
+	End If
+	'代理店ID情報の確認
+	If gSet_path_agent_id = "" Then
+		dispMsg "代理店IDが未設定です。" & vbCrLf & FILE_NAME_CONFIG & " に必要な情報を設定してください。"
+		Exit Function
+	End If
+	'検収月度の確認
+	If gSet_path_accept_month = "" Then
+		dispMsg "検収月次が未設定です。" & vbCrLf & FILE_NAME_CONFIG & " に必要な情報を設定してください。"
+		Exit Function
+	End If
+	
+	fnc_Setting = True
+End Function
+
+'パス情報の適正化
+Private Function fnc_properPath(sPath)
+	sPath = Trim(sPath)
+	If Left(sPath, 2) = "\\" Or Mid(sPath, 2, 1) = ":" Then
+		'絶対パス
+		fnc_properPath = sPath
+	Else
+		'相対パス
+		fnc_properPath = gMyDir & "\" & sPath
+	End If
+End Function
+
+'ダイアログボックスの表示文言編集
+'本社一括対象だった場合、「本社ID」「本社名」、本社登録されている全ての「支社ID」を表示
+Private Function fnc_checkWill()
+	
+	Dim	sMsg
+	Dim iCnt
+	
+	If gAgIDMains = "" Then	
+		sMsg = "本処理は以下のMDBの月次データを差し戻します。"
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & " - " & gSet_path_mdb_stock & vbCrLf & vbCrLf
+		sMsg = sMsg & "代理店ID = " & gAgIDs(0)
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & "検収月度 = " & gSet_path_accept_month
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & "処理を続けてよろしいですか？"
+	Else
+		sMsg = "本処理は以下のMDBの月次データを差し戻します。"
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & " - " & gSet_path_mdb_stock & vbCrLf & vbCrLf
+		sMsg = sMsg & "代理店ID = " & gSet_path_agent_id
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & "検収月度 = " & gSet_path_accept_month
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & "本データは本社一括対象です。以下は本社情報です。"
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & "本社代理店ID = " & gAgIDMains
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & "本社代理店名 = " & gAgIDMainsName
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & vbCrLf & vbCrLf
+		sMsg = sMsg & "本データは本社一括対象です。以下は支社情報です。"
+		sMsg = sMsg & vbCrLf & vbCrLf
+		
+		iCnt = 0
+		For iCnt = LBound(gAgIDs) To (UBound(gAgIDs) - 1)
+			sMsg = sMsg & "支社代理店ID = " & gAgIDs(iCnt) 
+			sMsg = sMsg & vbCrLf & vbCrLf
+		Next
+		sMsg = sMsg & "処理を続けてよろしいですか？"
+	End If
+	fnc_checkWill = choice(sMsg)
+End Function
+
+'本社一括チェック：入力された代理店IDが本社一括対象データか確認
+Private Function fnc_checkAgID(sAgID)
+	Dim rs
+	Dim sSQL
+	Dim iCnt
+	Dim iCount
+	Dim conMaster
+	
+	fnc_checkAgID = False
+	
+	Set rs = CreateObject("ADODB.Recordset")
+	
+	'ADOオブジェクトを作成
+	Set conMaster = CreateObject("ADODB.Connection")
+
+	'ADOを使い検収マスタMDBをオープン
+	conMaster.Open "Driver={Microsoft Access Driver (*.mdb)}; DBQ=" & gSet_path_mdb_master & ";"
+
+	'入力された代理店IDが本社一括対象かどうか確認
+	sSQL =        "SELECT COUNT(*) AS 件数 "
+	sSQL = sSQL & "FROM 本社一括_本社支社一覧 "
+	sSQL = sSQL & "WHERE 支社ID='" & sAgID & "' "
+	rs.Open sSQL, conMaster
+	
+	iCount = CInt(rs.Fields("件数").Value)
+	rs.Close
+	
+	If iCount = 0 Then
+		'本社一括対象外データなので、gAgIDs(0)に入力された代理店IDをそのままセット
+		gAgIDs(0) = sAgID
+	Else
+		'検収マスタMDBの「本社一括_本社支社一覧」TBLから支社IDをキーに「本社ID」「本社名」を取得
+		sSQL =        "SELECT 本社ID,本社名,支社ID "
+		sSQL = sSQL & "FROM 本社一括_本社支社一覧 "
+		sSQL = sSQL & "WHERE 支社ID='" & sAgID & "' "
+		sSQL = sSQL & "ORDER BY 支社ID;"
+		rs.Open sSQL, conMaster
+	
+		gAgIDMains = CStr(rs.Fields("本社ID").Value)
+		gAgIDMainsName = Cstr(rs.Fields("本社名").Value)
+		
+		rs.Close
+		
+		sSQL =        "SELECT 本社ID,本社名,支社ID "
+		sSQL = sSQL & "FROM 本社一括_本社支社一覧 "
+		sSQL = sSQL & "WHERE 本社ID='" & gAgIDMains & "' "
+		sSQL = sSQL & "ORDER BY 支社ID;"
+		rs.Open sSQL, conMaster
+		
+		iCnt = 0
+		Do Until rs.EOF
+			iCnt = UBound(gAgIDs)
+			Redim Preserve gAgIDs(iCnt + 1)
+			If gAgIDMains = CStr(rs.Fields("本社ID").Value) Then
+				gAgIDs(iCnt) = CStr(rs.Fields("支社ID").Value)
+			End If
+			rs.MoveNext
+		Loop
+		rs.Close
+	End If
+	
+	fnc_checkAgID = True
+	
+	conMaster.Close
+	Set rs = Nothing
+End Function
+
+'月次データの差し戻し
+'--------------------------------------------------------------------------------------------
+'データを月次実行前に戻すため、すでに検収完了されているテーブルから、
+'「代理店ID」「検収月度」に一致したデータを
+'①検収対象報告・検収対象機体番号テーブルに移動、移動後、検収対象報告の「検収月度」はクリア
+'（クリアしないと検収対象とみなされないため）、検収対象報告の「処理済みフラグ」は"0"に変更
+'②以下７テーブルから削除
+'検収完了完了報告
+'検収完了機体番号
+'検収完了促進加速費
+'検収完了追加促進加速費
+'通知書発行リスト
+'通知書発行リスト免許人詳細
+'通知書発行リスト免許人詳細EX
+'--------------------------------------------------------------------------------------------
+
+Private Function fnc_returnMDB(con)
+	Dim sSQL
+	Dim iCnt
+	fnc_returnMDB = False
+	
+	iCnt = 0
+	'本社一括対象の場合、本社に所属している支社全て差し戻す
+	For iCnt = LBound(gAgIDs) To UBound(gAgIDs)
+		Call fnc_insert_delete(con,gAgIDs(iCnt),gSet_path_accept_month)
+	Next
+
+	fnc_returnMDB = True
+End Function
+
+'代理店データの差し戻し
+Private Function fnc_insert_delete(con, sAgentID, mBizMonth)
+	Dim sSQL
+	
+	fnc_insert_delete = False
+	
+	'---------------------------------------------------------
+	'対象データ条件「代理店ID」「検収月度」が一致するデータ
+	'---------------------------------------------------------
+	
+	'「検収完了機体番号」から「検収対象機体番号」に移動
+	sSQL =        "INSERT INTO 検収対象機体番号 (ファイルID,行番号,代理店ID,MNum,種別,旧端末機体番号,旧端末機体台数,リース端末機体番号,リース端末台数,新端末機体番号,新端末機体台数,備考,工事区分,局,FM番号) "
+	sSQL = sSQL & "SELECT 検収完了機体番号.ファイルID, 検収完了機体番号.行番号, 検収完了機体番号.代理店ID, 検収完了機体番号.MNum, 検収完了機体番号.種別, 検収完了機体番号.旧端末機体番号, 検収完了機体番号.旧端末機体台数, 検収完了機体番号.リース端末機体番号, 検収完了機体番号.リース端末台数, 検収完了機体番号.新端末機体番号, 検収完了機体番号.新端末機体台数, 検収完了機体番号.備考, 検収完了機体番号.工事区分, 検収完了機体番号.局, 検収完了機体番号.FM番号 "
+	sSQL = sSQL & "FROM 検収完了完了報告 INNER JOIN 検収完了機体番号 ON 検収完了完了報告.ファイルID = 検収完了機体番号.ファイルID "
+	sSQL = sSQL & "WHERE ((検収完了完了報告.代理店ID)='" & sAgentID & "') AND ((検収完了完了報告.検収月度)='" & mBizMonth & "') "
+	sSQL = sSQL & "ORDER BY 検収完了機体番号.ファイルID, 検収完了機体番号.行番号;"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「検収完了機体番号」からデータ削除
+	sSQL =        "DELETE FROM 検収完了機体番号 "
+	sSQL = sSQL & "WHERE ファイルID IN ("
+	sSQL = sSQL & "SELECT ファイルID FROM 検収完了完了報告 "
+	sSQL = sSQL & "WHERE ((検収完了完了報告.代理店ID)='" & sAgentID & "') AND ((検収完了完了報告.検収月度)='" & mBizMonth & "') "
+	sSQL = sSQL & ");"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「検収完了完了報告」から「検収対象完了報告」に移動
+	sSQL =        "INSERT INTO 検収対象完了報告 (ファイルID,代理店ID,代理店名,MNum,免許人名,代表者名,月度,工事完了確認書受領日,工事完了日,新旧端末機体番号記載表受領日,精査結果,差戻し日,差戻し理由,最終版2書類受領日,工事内容,所有権放棄,処理済みフラグ,検収月度,FM番号) "
+	sSQL = sSQL & "SELECT ファイルID,代理店ID,代理店名,MNum,免許人名,代表者名,月度,工事完了確認書受領日,工事完了日,新旧端末機体番号記載表受領日,精査結果,差戻し日,差戻し理由,最終版2書類受領日,工事内容,所有権放棄,処理済みフラグ,検収月度,FM番号  "
+	sSQL = sSQL & "FROM 検収完了完了報告 "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (検収月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「検収対象完了報告」の処理済みフラグを"0"に変更
+	sSQL =        "UPDATE 検収対象完了報告 "
+	sSQL = sSQL & "SET 処理済みフラグ = 0 "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (検収月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「検収対象完了報告」の検収月度をクリア
+	sSQL =        "UPDATE 検収対象完了報告 "
+	sSQL = sSQL & "SET 検収月度 = NULL "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (検収月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「検収完了完了報告」からデータ削除
+	sSQL =        "DELETE FROM 検収完了完了報告 "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (検収月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「検収完了促進加速費」からデータ削除
+	sSQL =        "DELETE FROM 検収完了促進加速費 "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (検収月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「検収完了追加促進加速費」からデータ削除
+	sSQL =        "DELETE FROM 検収完了追加促進加速費 "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (検収月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「通知書発行リスト」からデータ削除
+	sSQL =        "DELETE FROM 通知書発行リスト "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「通知書発行リスト免許人詳細」からデータ削除
+	sSQL =        "DELETE FROM 通知書発行リスト免許人詳細 "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「通知書発行リスト免許人詳細EX」からデータ削除
+	sSQL =        "DELETE FROM 通知書発行リスト免許人詳細EX "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「検収管理検収一覧」からデータ削除
+	sSQL =        "DELETE FROM 検収管理検収一覧 "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	'「請求書検収一覧」からデータ削除
+	sSQL =        "DELETE FROM 請求書検収一覧 "
+	sSQL = sSQL & "WHERE (代理店ID='" & sAgentID & "') AND (月度='" & mBizMonth & "');"
+	con.Execute sSQL, , adExecuteNoRecords
+	
+	fnc_insert_delete = True
+End Function
+
+'ダイアログボックスにメッセージと表示ボタン設定：vbOKOnly「OK」ボタンのみ表示
+Private Sub dispMsg(sMsg)
+	MsgBox sMsg, vbOKOnly, "[MCA]検収ツール 月次データ差し戻し処理 Ver " & MY_VERSION
+End Sub
+
+'ダイアログ表示ボタン設定:vbOKCancel「OK」ボタン「キャンセル」ボタン表示
+Private Function choice(sMsg)
+	Dim res
+	
+	res = MsgBox(sMsg, vbOKCancel, "[MCA]検収ツール 月次データ差し戻し処理 Ver " & MY_VERSION)
+	If res = vbOK Then
+		choice = True
+	Else
+		choice = False
+	End If
+End Function
